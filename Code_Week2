@@ -1,0 +1,198 @@
+const validator = require("validator");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+
+const UserDAO = require("../data/user-dao").UserDAO;
+const AllocationsDAO = require("../data/allocations-dao").AllocationsDAO;
+const { environmentalScripts } = require("../../config/config");
+
+function SessionHandler(db) {
+    "use strict";
+
+    const userDAO = new UserDAO(db);
+    const allocationsDAO = new AllocationsDAO(db);
+
+    const prepareUserData = (user, next) => {
+        const stocks = Math.floor((Math.random() * 40) + 1);
+        const funds = Math.floor((Math.random() * 40) + 1);
+        const bonds = 100 - (stocks + funds);
+
+        allocationsDAO.update(user._id, stocks, funds, bonds, (err) => {
+            if (err) return next(err);
+        });
+    };
+
+    this.isAdminUserMiddleware = (req, res, next) => {
+        if (req.session.userId) {
+            return userDAO.getUserById(req.session.userId, (err, user) => {
+                return user && user.isAdmin ? next() : res.redirect("/login");
+            });
+        }
+        return res.redirect("/login");
+    };
+
+    this.isLoggedInMiddleware = (req, res, next) => {
+        if (req.session.userId) {
+            return next();
+        }
+        return res.redirect("/login");
+    };
+
+    this.displayLoginPage = (req, res) => {
+        return res.render("login", {
+            userName: "",
+            password: "",
+            loginError: "",
+            environmentalScripts
+        });
+    };
+
+    this.handleLoginRequest = (req, res, next) => {
+        const { userName, password } = req.body;
+        const invalidMessage = "Invalid username or password";
+
+        userDAO.getUserByUserName(userName, (err, user) => {
+            if (err || !user) {
+                return res.render("login", {
+                    userName,
+                    password: "",
+                    loginError: invalidMessage,
+                    environmentalScripts
+                });
+            }
+
+            bcrypt.compare(password, user.password, (err, match) => {
+                if (err || !match) {
+                    return res.render("login", {
+                        userName,
+                        password: "",
+                        loginError: invalidMessage,
+                        environmentalScripts
+                    });
+                }
+               req.session.regenerate(() => {
+                    req.session.userId = user._id;
+
+                    // Optional: Generate JWT token
+                    // const token = jwt.sign({ id: user._id }, "your-secret-key", { expiresIn: "1h" });
+                    // res.cookie("auth_token", token, { httpOnly: true });
+
+                    return res.redirect(user.isAdmin ? "/benefits" : "/dashboard");
+                });
+            });
+        });
+    };
+
+    this.displayLogoutPage = (req, res) => {
+        req.session.destroy(() => res.redirect("/"));
+    };
+
+    this.displaySignupPage = (req, res) => {
+        res.render("signup", {
+            userName: "",
+            password: "",
+            passwordError: "",
+            email: "",
+            userNameError: "",
+            emailError: "",
+            verifyError: "",
+            environmentalScripts
+        });
+    };
+
+    const validateSignup = (userName, firstName, lastName, password, verify, email, errors) => {
+        const NAME_RE = /^.{1,100}$/;
+        const USER_RE = /^.{1,20}$/;
+        const PASS_RE = /^(?=.\d)(?=.[a-z])(?=.*[A-Z]).{8,}$/;
+
+        errors.userNameError = "";
+        errors.firstNameError = "";
+        errors.lastNameError = "";
+        errors.passwordError = "";
+        errors.verifyError = "";
+        errors.emailError = "";
+
+        if (!USER_RE.test(userName)) {
+            errors.userNameError = "Invalid user name.";
+            return false;
+        }
+        if (!NAME_RE.test(firstName)) {
+            errors.firstNameError = "Invalid first name.";
+            return false;
+        }
+        if (!NAME_RE.test(lastName)) {
+            errors.lastNameError = "Invalid last name.";
+            return false;
+        }
+        if (!PASS_RE.test(password)) {
+            errors.passwordError = "Password must be at least 8 characters, including uppercase, lowercase, and numbers.";
+            return false;
+        }
+        if (password !== verify) {
+            errors.verifyError = "Passwords do not match.";
+            return false;
+        }
+        if (email && !validator.isEmail(email)) {
+            errors.emailError = "Invalid email address.";
+            return false;
+        }
+        return true;
+    };
+
+    this.handleSignup = (req, res, next) => {
+        const { email, userName, firstName, lastName, password, verify } = req.body;
+        const errors = { userName, email };
+
+        if (validateSignup(userName, firstName, lastName, password, verify, email, errors)) {
+            userDAO.getUserByUserName(userName, (err, existingUser) => {
+                if (err) return next(err);
+                if (existingUser) {
+                    errors.userNameError = "Username already exists.";
+                    return res.render("signup", { ...errors, environmentalScripts });
+                }
+
+                bcrypt.hash(password, 10, (err, hashedPassword) => {
+                    if (err) return next(err);
+
+                    userDAO.addUser(userName, firstName, lastName, hashedPassword, email, (err, user) => {
+                        if (err) return next(err);
+
+                        prepareUserData(user, next);
+
+                        req.session.regenerate(() => {
+                            req.session.userId = user._id;
+                            user.userId = user._id;
+
+                            return res.render("dashboard", {
+                                ...user,
+                                environmentalScripts
+                            });
+                        });
+                    });
+                });
+            });
+        } else {
+            return res.render("signup", {
+                ...errors,
+                environmentalScripts
+            });
+        }
+    };
+
+    this.displayWelcomePage = (req, res, next) => {
+        if (!req.session.userId) {
+            return res.redirect("/login");
+        }
+
+        userDAO.getUserById(req.session.userId, (err, user) => {
+            if (err) return next(err);
+            user.userId = req.session.userId;
+            return res.render("dashboard", {
+                ...user,
+                environmentalScripts
+            });
+        });
+    };
+}
+
+module.exports = SessionHandler;
